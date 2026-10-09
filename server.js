@@ -1,5 +1,7 @@
 const express=require('express'),http=require('http'),{Server}=require('socket.io'),path=require('path');
 const app=express(),server=http.createServer(app),io=new Server(server,{pingTimeout:20000});app.use(express.static(path.join(__dirname,'public')));
+app.use(express.static(__dirname));
+app.get('/',(req,res)=>res.sendFile(__dirname+'/index.html'));
 const rooms=new Map();
 const C={croc:{n:'크록냥',hp:100},gayper:{n:'게이퍼',hp:90},ham:{n:'햄붕이',hp:95},big:{n:'빅딕',hp:120},odo:{n:'오도냥',hp:105},bazu:{n:'바주냥',hp:100}};
 const makeCode=()=>Math.random().toString(36).slice(2,6).toUpperCase(),newWind=()=>Math.floor(Math.random()*21)-10;
