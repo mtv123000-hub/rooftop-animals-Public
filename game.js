@@ -1,6 +1,18 @@
 const S=io(),$=q=>document.querySelector(q),D={croc:{n:'크록냥',img:'crocnyang.png',s:['크록샷','짝짝이','크록스 폭격']},gayper:{n:'게이퍼',img:'gayper.png',s:['저격탄','관통탄','헤드샷']},ham:{n:'햄붕이',img:'hambungi.png',s:['햄탄','따다당','햄스터 난사']},big:{n:'빅딕',img:'bigdick.png',s:['박격포','빅볼','빅딕밤']},odo:{n:'오도냥',img:'odonyang.png',s:['빠따포','따따블','오도폭타']},bazu:{n:'바주냥',img:'bazunyang.png',s:['바주카','울보탄','대성통곡']}};
 let st=null,id=null,skill=1,timer=null,left=20,lastTurn=null;const names={double:'💥 더블',power:'🔥 화력 +30%',heal:'❤️ 참치캔',shield:'🛡️ 철갑',wind:'🌪️ 풍향반전'};
-S.on('connect',()=>id=S.id);const qs=new URLSearchParams(location.search);if(qs.get('room'))$('#code').value=qs.get('room').toUpperCase();
+S.on('connect',()=>{
+  id=S.id;
+
+  const qs=new URLSearchParams(location.search);
+  const room=qs.get('room');
+
+  if(room){
+    $('#code').value=room.toUpperCase();
+    $('#create').style.display='none';
+    $('#join').textContent='초대받은 방 참가';
+    $('#err').textContent='닉네임을 입력하고 참가를 눌러주세요.';
+  }
+});
 $('#roster').innerHTML=Object.entries(D).map(([k,v])=>`<button class="pick" data-k="${k}"><img src="${v.img}" alt="${v.n}"><b>${v.n}</b><small>${v.s.join(' · ')}</small></button>`).join('');
 $('#create').onclick=()=>S.emit('create',{nick:$('#nick').value});$('#join').onclick=()=>S.emit('join',{nick:$('#nick').value,code:$('#code').value});S.on('err',m=>{$('#err').textContent=m;notice(m)});
 document.querySelectorAll('.pick').forEach(b=>b.onclick=()=>{document.querySelectorAll('.pick').forEach(x=>x.classList.remove('on'));b.classList.add('on');S.emit('select',{char:b.dataset.k})});
