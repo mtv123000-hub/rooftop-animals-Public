@@ -5,7 +5,11 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { pingTimeout: 20000 });
+
+const io = new Server(server, {
+  pingTimeout: 30000,
+  pingInterval: 10000
+});
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.static(__dirname));
@@ -25,11 +29,16 @@ const C = {
   bazu: { n: '바주냥', hp: 100 }
 };
 
-const makeCode = () =>
-  Math.random().toString(36).slice(2, 6).toUpperCase();
+function makeCode() {
+  return Math.random()
+    .toString(36)
+    .slice(2, 6)
+    .toUpperCase();
+}
 
-const newWind = () =>
-  Math.floor(Math.random() * 21) - 10;
+function newWind() {
+  return Math.floor(Math.random() * 21) - 10;
+}
 
 function publicState(r) {
   return {
@@ -40,7 +49,20 @@ function publicState(r) {
     turnNo: r.turnNo,
     craters: r.craters,
     box: r.box,
-    players: r.players.map(p => ({ ...p }))
+
+    players: r.players.map(p => ({
+      id: p.id,
+      nick: p.nick,
+      char: p.char,
+      ready: p.ready,
+      hp: p.hp,
+      x: p.x,
+      items: p.items,
+      ult: p.ult,
+      shield: p.shield,
+      fallen: p.fallen,
+      online: p.online
+    }))
   };
 }
 
@@ -48,12 +70,16 @@ function emit(r) {
   io.to(r.code).emit('state', publicState(r));
 }
 
-function getRoom(s) {
-  return rooms.get(s.data.room);
+function getRoom(socket) {
+  return rooms.get(socket.data.room);
 }
 
-function player(r, id) {
-  return r.players.find(p => p.id === id);
+function getPlayer(r, pid) {
+  return r.players.find(p => p.id === pid);
+}
+
+function getSocketPlayer(r, socket) {
+  return getPlayer(r, socket.data.pid);
 }
 
 function collect(r, p) {
@@ -74,14 +100,18 @@ function collect(r, p) {
 }
 
 function unstable(r, p) {
-  return r.craters.some(
-    c =>
-      c.r >= 58 &&
-      Math.abs(p.x - c.x) < Math.max(20, c.r * 0.32)
+  return r.craters.some(c =>
+    c.r >= 58 &&
+    Math.abs(p.x - c.x) <
+      Math.max(20, c.r * 0.32)
   );
 }
 
 function begin(r) {
+  if (r.started) return;
+  if (r.players.length !== 2) return;
+  if (!r.players.every(p => p.ready && p.online)) return;
+
   r.started = true;
   r.wind = newWind();
   r.turnNo = 1;
@@ -102,6 +132,12 @@ function begin(r) {
   r.turn =
     r.players[Math.floor(Math.random() * 2)].id;
 
+  console.log(
+    '게임 시작:',
+    r.code,
+    r.players.map(p => p.nick)
+  );
+
   emit(r);
 }
 
@@ -121,21 +157,38 @@ function end(r, winner, reason) {
   });
 }
 
-io.on('connection', s => {
+function attachPlayer(socket, r, p) {
+  p.socketId = socket.id;
+  p.online = true;
 
-  // =========================
+  socket.data.room = r.code;
+  socket.data.pid = p.id;
+
+  socket.join(r.code);
+}
+
+io.on('connection', socket => {
+  console.log('소켓 연결:', socket.id);
+
   // 방 만들기
-  // =========================
-  s.on('create', d => {
+  socket.on('create', d => {
+    const pid = String(d.pid || '').trim();
 
-    let c;
+    if (!pid) {
+      return socket.emit(
+        'err',
+        '플레이어 ID가 없습니다. 새로고침 후 다시 시도하세요.'
+      );
+    }
+
+    let code;
 
     do {
-      c = makeCode();
-    } while (rooms.has(c));
+      code = makeCode();
+    } while (rooms.has(code));
 
     const r = {
-      code: c,
+      code,
       players: [],
       started: false,
       turn: null,
@@ -145,14 +198,15 @@ io.on('connection', s => {
       box: null
     };
 
-    rooms.set(c, r);
+    const p = {
+      id: pid,
+      socketId: socket.id,
 
-    r.players.push({
-      id: s.id,
       nick:
         (d.nick || '익명')
           .trim()
           .slice(0, 12) || '익명',
+
       char: 'bazu',
       ready: false,
       hp: 100,
@@ -160,86 +214,133 @@ io.on('connection', s => {
       items: [],
       ult: 1,
       shield: false,
-      fallen: false
-    });
+      fallen: false,
+      online: true
+    };
 
-    s.join(c);
-    s.data.room = c;
+    r.players.push(p);
+    rooms.set(code, r);
 
-    console.log('방 생성:', c);
+    attachPlayer(socket, r, p);
+
+    console.log(
+      '방 생성:',
+      code,
+      p.nick,
+      pid
+    );
 
     emit(r);
   });
 
-  // =========================
   // 방 참가
-  // =========================
-  s.on('join', d => {
-
+  socket.on('join', d => {
     const code =
       String(d.code || '')
         .trim()
         .toUpperCase();
 
-    console.log(
-      '방 참가 요청:',
-      code,
-      '현재 방:',
-      [...rooms.keys()]
-    );
+    const pid =
+      String(d.pid || '')
+        .trim();
 
     if (!code) {
-      return s.emit(
+      return socket.emit(
         'err',
         '방 코드가 없습니다.'
+      );
+    }
+
+    if (!pid) {
+      return socket.emit(
+        'err',
+        '플레이어 ID가 없습니다.'
       );
     }
 
     const r = rooms.get(code);
 
     if (!r) {
-      return s.emit(
+      return socket.emit(
         'err',
         '방을 찾을 수 없습니다: ' + code
       );
     }
 
+    // 같은 플레이어의 재접속
+    let p = getPlayer(r, pid);
+
+    if (p) {
+      attachPlayer(socket, r, p);
+
+      if (d.nick) {
+        p.nick =
+          String(d.nick)
+            .trim()
+            .slice(0, 12) || p.nick;
+      }
+
+      console.log(
+        '플레이어 재접속:',
+        code,
+        p.nick
+      );
+
+      emit(r);
+
+      if (
+        !r.started &&
+        r.players.length === 2 &&
+        r.players.every(x => x.ready && x.online)
+      ) {
+        setTimeout(() => begin(r), 300);
+      }
+
+      return;
+    }
+
     if (r.started) {
-      return s.emit(
+      return socket.emit(
         'err',
-        '이미 게임이 시작된 방입니다: ' + code
+        '이미 게임이 시작된 방입니다.'
       );
     }
 
     if (r.players.length >= 2) {
-      return s.emit(
+      return socket.emit(
         'err',
-        '이미 2명이 들어와 있는 방입니다: ' + code
+        '이미 2명이 들어와 있는 방입니다.'
       );
     }
 
-    r.players.push({
-      id: s.id,
+    p = {
+      id: pid,
+      socketId: socket.id,
+
       nick:
         (d.nick || '익명')
           .trim()
           .slice(0, 12) || '익명',
+
       char: 'bazu',
       ready: false,
       hp: 100,
-      x: 855,
+      x: r.players.length === 0 ? 145 : 855,
       items: [],
       ult: 1,
       shield: false,
-      fallen: false
-    });
+      fallen: false,
+      online: true
+    };
 
-    s.join(r.code);
-    s.data.room = r.code;
+    r.players.push(p);
+
+    attachPlayer(socket, r, p);
 
     console.log(
-      '방 참가 성공:',
-      r.code,
+      '방 참가:',
+      code,
+      p.nick,
       '인원:',
       r.players.length
     );
@@ -247,53 +348,96 @@ io.on('connection', s => {
     emit(r);
   });
 
-  // =========================
-  // 캐릭터 선택
-  // =========================
-  s.on('select', d => {
+  // 재접속 자동 복귀
+  socket.on('resume', d => {
+    const code =
+      String(d.code || '')
+        .trim()
+        .toUpperCase();
 
-    const r = getRoom(s);
-    const p = r && player(r, s.id);
+    const pid =
+      String(d.pid || '')
+        .trim();
+
+    if (!code || !pid) return;
+
+    const r = rooms.get(code);
+
+    if (!r) {
+      return socket.emit('resume-failed');
+    }
+
+    const p = getPlayer(r, pid);
+
+    if (!p) {
+      return socket.emit('resume-failed');
+    }
+
+    attachPlayer(socket, r, p);
+
+    console.log(
+      '자동 복귀:',
+      code,
+      p.nick
+    );
+
+    emit(r);
 
     if (
-      !p ||
-      r.started ||
-      !C[d.char]
-    ) return;
+      !r.started &&
+      r.players.length === 2 &&
+      r.players.every(x => x.ready && x.online)
+    ) {
+      setTimeout(() => begin(r), 300);
+    }
+  });
+
+  // 캐릭터 선택
+  socket.on('select', d => {
+    const r = getRoom(socket);
+
+    if (!r || r.started) return;
+
+    const p =
+      getSocketPlayer(r, socket);
+
+    if (!p) return;
+    if (!C[d.char]) return;
 
     p.char = d.char;
     p.ready = true;
+    p.online = true;
+
+    console.log(
+      '캐릭터 선택:',
+      r.code,
+      p.nick,
+      d.char
+    );
 
     emit(r);
 
     if (
       r.players.length === 2 &&
-      r.players.every(x => x.ready)
+      r.players.every(x => x.ready && x.online)
     ) {
       setTimeout(() => {
-        if (
-          r.players.length === 2 &&
-          !r.started
-        ) {
-          begin(r);
-        }
+        begin(r);
       }, 500);
     }
   });
 
-  // =========================
   // 이동
-  // =========================
-  s.on('move', d => {
+  socket.on('move', d => {
+    const r = getRoom(socket);
 
-    const r = getRoom(s);
-    const p = r && player(r, s.id);
+    if (!r || !r.started) return;
 
-    if (
-      !p ||
-      !r.started ||
-      r.turn !== s.id
-    ) return;
+    const p =
+      getSocketPlayer(r, socket);
+
+    if (!p) return;
+    if (r.turn !== p.id) return;
 
     p.x = Math.max(
       45,
@@ -313,17 +457,19 @@ io.on('connection', s => {
     collect(r, p);
 
     if (unstable(r, p)) {
-
       p.fallen = true;
       p.hp = 0;
 
       emit(r);
 
-      return end(
-        r,
+      const winner =
         r.players.find(
           x => x.id !== p.id
-        )?.id,
+        );
+
+      return end(
+        r,
+        winner?.id,
         '낙사'
       );
     }
@@ -331,20 +477,21 @@ io.on('connection', s => {
     emit(r);
   });
 
-  // =========================
   // 아이템
-  // =========================
-  s.on('use', d => {
+  socket.on('use', d => {
+    const r = getRoom(socket);
 
-    const r = getRoom(s);
-    const p = r && player(r, s.id);
+    if (!r || !r.started) return;
 
-    if (
-      !p ||
-      !r.started ||
-      r.turn !== s.id ||
-      !p.items.includes(d.item)
-    ) return;
+    const p =
+      getSocketPlayer(r, socket);
+
+    if (!p) return;
+    if (r.turn !== p.id) return;
+
+    if (!p.items.includes(d.item)) {
+      return;
+    }
 
     const i =
       p.items.indexOf(d.item);
@@ -369,51 +516,51 @@ io.on('connection', s => {
     emit(r);
   });
 
-  // =========================
   // 발사
-  // =========================
-  s.on('fire', d => {
+  socket.on('fire', d => {
+    const r = getRoom(socket);
 
-    const r = getRoom(s);
+    if (!r || !r.started) return;
 
-    if (
-      !r ||
-      !r.started ||
-      r.turn !== s.id
-    ) return;
+    const p =
+      getSocketPlayer(r, socket);
 
-    const p = player(r, s.id);
+    if (!p) return;
+    if (r.turn !== p.id) return;
 
     const q =
       r.players.find(
-        x => x.id !== s.id
+        x => x.id !== p.id
       );
 
-    if (!p || !q) return;
+    if (!q) return;
 
-    let a = Math.max(
-      10,
-      Math.min(
-        80,
-        Number(d.angle) || 45
-      )
-    );
+    let a =
+      Math.max(
+        10,
+        Math.min(
+          80,
+          Number(d.angle) || 45
+        )
+      );
 
-    let pow = Math.max(
-      20,
-      Math.min(
-        100,
-        Number(d.power) || 60
-      )
-    );
+    let pow =
+      Math.max(
+        20,
+        Math.min(
+          100,
+          Number(d.power) || 60
+        )
+      );
 
-    let sk = Math.max(
-      1,
-      Math.min(
-        3,
-        Number(d.skill) || 1
-      )
-    );
+    let sk =
+      Math.max(
+        1,
+        Math.min(
+          3,
+          Number(d.skill) || 1
+        )
+      );
 
     if (
       sk === 3 &&
@@ -457,7 +604,6 @@ io.on('connection', s => {
       x < 1080 &&
       y < 390
     ) {
-
       t += 0.05;
 
       x += vx * 3.2;
@@ -473,7 +619,9 @@ io.on('connection', s => {
     const hitX = x;
 
     const dist =
-      Math.abs(hitX - q.x);
+      Math.abs(
+        hitX - q.x
+      );
 
     const base = {
       croc: 27,
@@ -507,7 +655,8 @@ io.on('connection', s => {
               base *
                 (1 - dist / radius) +
               8
-            ) * mult
+            ) *
+              mult
           )
         : 0;
 
@@ -517,22 +666,23 @@ io.on('connection', s => {
       item &&
       p.items.includes(item)
     ) {
-
       p.items.splice(
         p.items.indexOf(item),
         1
       );
 
       if (item === 'power') {
-        dmg = Math.round(
-          dmg * 1.3
-        );
+        dmg =
+          Math.round(
+            dmg * 1.3
+          );
       }
 
       if (item === 'double') {
-        dmg = Math.round(
-          dmg * 1.65
-        );
+        dmg =
+          Math.round(
+            dmg * 1.65
+          );
       }
     }
 
@@ -540,18 +690,19 @@ io.on('connection', s => {
       q.shield &&
       dmg
     ) {
-
-      dmg = Math.ceil(
-        dmg * 0.5
-      );
+      dmg =
+        Math.ceil(
+          dmg * 0.5
+        );
 
       q.shield = false;
     }
 
-    q.hp = Math.max(
-      0,
-      q.hp - dmg
-    );
+    q.hp =
+      Math.max(
+        0,
+        q.hp - dmg
+      );
 
     const crater = {
       x: Math.max(
@@ -600,19 +751,19 @@ io.on('connection', s => {
     }
 
     if (unstable(r, q)) {
-
       q.fallen = true;
       q.hp = 0;
 
       emit(r);
 
       return setTimeout(
-        () =>
+        () => {
           end(
             r,
             p.id,
             '낙사'
-          ),
+          );
+        },
         450
       );
     }
@@ -623,7 +774,6 @@ io.on('connection', s => {
       r.turnNo % 3 === 0 &&
       !r.box
     ) {
-
       const itemList = [
         'double',
         'power',
@@ -654,19 +804,22 @@ io.on('connection', s => {
 
     collect(r, p);
 
-    r.wind = Math.max(
-      -10,
-      Math.min(
-        10,
-        r.wind +
-          Math.floor(
-            Math.random() * 7
-          ) -
-          3
-      )
-    );
+    r.wind =
+      Math.max(
+        -10,
+        Math.min(
+          10,
+          r.wind +
+            Math.floor(
+              Math.random() * 7
+            ) -
+            3
+        )
+      );
 
-    if (Math.random() < 0.12) {
+    if (
+      Math.random() < 0.12
+    ) {
       r.wind = -r.wind;
     }
 
@@ -675,45 +828,101 @@ io.on('connection', s => {
     emit(r);
   });
 
-  // =========================
   // 접속 종료
-  // =========================
-  s.on('disconnect', () => {
+  // 즉시 삭제하지 않고 30초 동안 자리 보존
+  socket.on('disconnect', () => {
+    const code =
+      socket.data.room;
 
-    const r = getRoom(s);
+    const pid =
+      socket.data.pid;
+
+    if (!code || !pid) return;
+
+    const r =
+      rooms.get(code);
 
     if (!r) return;
 
-    r.players =
-      r.players.filter(
-        p => p.id !== s.id
-      );
+    const p =
+      getPlayer(r, pid);
 
-    if (!r.players.length) {
+    if (!p) return;
 
-      rooms.delete(r.code);
+    // 이미 새 소켓으로 재접속했다면
+    // 예전 소켓의 disconnect는 무시
+    if (
+      p.socketId !== socket.id
+    ) {
+      return;
+    }
+
+    p.online = false;
+
+    console.log(
+      '연결 끊김 - 30초 복귀 대기:',
+      code,
+      p.nick
+    );
+
+    emit(r);
+
+    setTimeout(() => {
+      const currentRoom =
+        rooms.get(code);
+
+      if (!currentRoom) return;
+
+      const currentPlayer =
+        getPlayer(
+          currentRoom,
+          pid
+        );
+
+      if (!currentPlayer) return;
+
+      if (currentPlayer.online) {
+        return;
+      }
+
+      currentRoom.players =
+        currentRoom.players.filter(
+          x => x.id !== pid
+        );
 
       console.log(
-        '방 삭제:',
-        r.code
+        '30초 초과 - 플레이어 제거:',
+        code,
+        currentPlayer.nick
       );
 
-    } else {
+      if (
+        currentRoom.players.length === 0
+      ) {
+        rooms.delete(code);
 
-      r.started = false;
-      r.turn = null;
+        console.log(
+          '빈 방 삭제:',
+          code
+        );
 
-      r.players.forEach(p => {
-        p.ready = false;
+        return;
+      }
+
+      currentRoom.started = false;
+      currentRoom.turn = null;
+
+      currentRoom.players.forEach(x => {
+        x.ready = false;
       });
 
-      emit(r);
+      emit(currentRoom);
 
-      io.to(r.code).emit(
+      io.to(code).emit(
         'err',
-        '상대가 나갔습니다.'
+        '상대의 연결이 종료되었습니다.'
       );
-    }
+    }, 30000);
   });
 });
 
