@@ -1,968 +1,1100 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const path = require('path');
+const S = io();
+const $ = q => document.querySelector(q);
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  pingTimeout: 30000,
-  pingInterval: 10000
-});
-
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.static(__dirname));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-const rooms = new Map();
-
-const C = {
-  croc: { n: '크록냥', hp: 100 },
-  gayper: { n: '게이퍼', hp: 90 },
-  ham: { n: '햄붕이', hp: 95 },
-  big: { n: '빅딕', hp: 120 },
-  odo: { n: '오도냥', hp: 105 },
-  bazu: { n: '바주냥', hp: 100 }
+const D = {
+  croc: {
+    n: '크록냥',
+    img: 'crocnyang.png',
+    s: ['크록샷', '짝짝이', '크록스 폭격']
+  },
+  gayper: {
+    n: '게이퍼',
+    img: 'gayper.png',
+    s: ['저격탄', '관통탄', '헤드샷']
+  },
+  ham: {
+    n: '햄붕이',
+    img: 'hambungi.png',
+    s: ['햄탄', '따다당', '햄스터 난사']
+  },
+  big: {
+    n: '빅딕',
+    img: 'bigdick.png',
+    s: ['박격포', '빅볼', '빅딕밤']
+  },
+  odo: {
+    n: '오도냥',
+    img: 'odonyang.png',
+    s: ['빠따포', '따따블', '오도폭타']
+  },
+  bazu: {
+    n: '바주냥',
+    img: 'bazunyang.png',
+    s: ['바주카', '울보탄', '대성통곡']
+  }
 };
 
-function makeCode() {
-  return Math.random()
-    .toString(36)
-    .slice(2, 6)
-    .toUpperCase();
-}
+const names = {
+  double: '💥 더블',
+  power: '🔥 화력 +30%',
+  heal: '❤️ 참치캔',
+  shield: '🛡️ 철갑',
+  wind: '🌪️ 풍향반전'
+};
 
-function newWind() {
-  return Math.floor(Math.random() * 21) - 10;
-}
+let st = null;
+let skill = 1;
+let timer = null;
+let left = 20;
+let lastTurn = null;
+let selectedChar = null;
 
-function publicState(r) {
-  return {
-    code: r.code,
-    started: r.started,
-    turn: r.turn,
-    wind: r.wind,
-    turnNo: r.turnNo,
-    craters: r.craters,
-    box: r.box,
+/*
+  고정 플레이어 ID.
+  socket.id는 재접속 때 바뀌므로
+  localStorage의 pid를 사용한다.
+*/
+let pid = localStorage.getItem('rooftop_pid');
 
-    players: r.players.map(p => ({
-      id: p.id,
-      nick: p.nick,
-      char: p.char,
-      ready: p.ready,
-      hp: p.hp,
-      x: p.x,
-      items: p.items,
-      ult: p.ult,
-      shield: p.shield,
-      fallen: p.fallen,
-      online: p.online
-    }))
-  };
-}
+if (!pid) {
+  pid =
+    'P_' +
+    Date.now().toString(36) +
+    '_' +
+    Math.random().toString(36).slice(2, 10);
 
-function emit(r) {
-  io.to(r.code).emit('state', publicState(r));
-}
-
-function getRoom(socket) {
-  return rooms.get(socket.data.room);
-}
-
-function getPlayer(r, pid) {
-  return r.players.find(p => p.id === pid);
-}
-
-function getSocketPlayer(r, socket) {
-  return getPlayer(r, socket.data.pid);
-}
-
-function collect(r, p) {
-  if (
-    r.box &&
-    Math.abs(p.x - r.box.x) < 70 &&
-    p.items.length < 2
-  ) {
-    p.items.push(r.box.item);
-
-    io.to(r.code).emit('pickup', {
-      player: p.id,
-      item: r.box.item
-    });
-
-    r.box = null;
-  }
-}
-
-function unstable(r, p) {
-  return r.craters.some(c =>
-    c.r >= 58 &&
-    Math.abs(p.x - c.x) <
-      Math.max(20, c.r * 0.32)
+  localStorage.setItem(
+    'rooftop_pid',
+    pid
   );
 }
 
-function begin(r) {
-  if (r.started) return;
-  if (r.players.length !== 2) return;
-  if (!r.players.every(p => p.ready && p.online)) return;
+let currentRoom =
+  sessionStorage.getItem('rooftop_room') || '';
 
-  r.started = true;
-  r.wind = newWind();
-  r.turnNo = 1;
-  r.craters = [];
-  r.box = null;
+let currentNick =
+  localStorage.getItem('rooftop_nick') || '';
 
-  r.players[0].x = 145;
-  r.players[1].x = 855;
+/* =========================
+   초기 화면
+========================= */
 
-  r.players.forEach(p => {
-    p.hp = C[p.char].hp;
-    p.ult = 1;
-    p.items = [];
-    p.shield = false;
-    p.fallen = false;
-  });
-
-  r.turn =
-    r.players[
-      Math.floor(Math.random() * 2)
-    ].id;
-
-  console.log(
-    '게임 시작:',
-    r.code,
-    r.players.map(p => p.nick)
-  );
-
-  emit(r);
+if (currentNick) {
+  $('#nick').value = currentNick;
 }
 
-function end(r, winner, reason) {
-  r.started = false;
-  r.turn = null;
+const initialQs =
+  new URLSearchParams(location.search);
 
-  emit(r);
+const invitedRoom =
+  initialQs.get('room');
 
-  io.to(r.code).emit('over', {
-    winner,
-    reason
-  });
+if (invitedRoom) {
+  $('#code').value =
+    invitedRoom.trim().toUpperCase();
 
-  r.players.forEach(p => {
-    p.ready = false;
-  });
+  $('#create').style.display = 'none';
+
+  $('#join').textContent =
+    '초대받은 방 참가';
+
+  $('#err').textContent =
+    '닉네임을 입력하고 참가를 눌러주세요.';
 }
 
-function attachPlayer(socket, r, p) {
-  p.socketId = socket.id;
-  p.online = true;
+/* =========================
+   서버 연결 / 자동 복귀
+========================= */
 
-  socket.data.room = r.code;
-  socket.data.pid = p.id;
+S.on('connect', () => {
+  console.log('서버 연결 완료');
 
-  socket.join(r.code);
-}
-
-io.on('connection', socket => {
-
-  console.log('소켓 연결:', socket.id);
-
-  /* =========================
-     방 만들기
-  ========================= */
-
-  socket.on('create', d => {
-    const pid = String(d.pid || '').trim();
-
-    if (!pid) {
-      return socket.emit(
-        'err',
-        '플레이어 ID가 없습니다. 새로고침 후 다시 시도하세요.'
-      );
-    }
-
-    let code;
-
-    do {
-      code = makeCode();
-    } while (rooms.has(code));
-
-    const r = {
-      code,
-      players: [],
-      started: false,
-      turn: null,
-      wind: 0,
-      turnNo: 0,
-      craters: [],
-      box: null
-    };
-
-    const p = {
-      id: pid,
-      socketId: socket.id,
-      nick:
-        (d.nick || '익명')
-          .trim()
-          .slice(0, 12) || '익명',
-
-      char: 'bazu',
-      ready: false,
-      hp: 100,
-      x: 145,
-      items: [],
-      ult: 1,
-      shield: false,
-      fallen: false,
-      online: true
-    };
-
-    r.players.push(p);
-    rooms.set(code, r);
-
-    attachPlayer(socket, r, p);
-
-    console.log(
-      '방 생성:',
-      code,
-      p.nick,
+  if (currentRoom) {
+    S.emit('resume', {
+      code: currentRoom,
       pid
-    );
-
-    emit(r);
-  });
-
-  /* =========================
-     방 참가
-  ========================= */
-
-  socket.on('join', d => {
-    const code =
-      String(d.code || '')
-        .trim()
-        .toUpperCase();
-
-    const pid =
-      String(d.pid || '')
-        .trim();
-
-    if (!code) {
-      return socket.emit(
-        'err',
-        '방 코드가 없습니다.'
-      );
-    }
-
-    if (!pid) {
-      return socket.emit(
-        'err',
-        '플레이어 ID가 없습니다.'
-      );
-    }
-
-    const r = rooms.get(code);
-
-    if (!r) {
-      return socket.emit(
-        'err',
-        '방을 찾을 수 없습니다: ' + code
-      );
-    }
-
-    /*
-      같은 플레이어가 다시 접속한 경우
-      새 플레이어로 추가하지 않고 복귀시킨다.
-    */
-    let p = getPlayer(r, pid);
-
-    if (p) {
-      attachPlayer(socket, r, p);
-
-      if (d.nick) {
-        p.nick =
-          String(d.nick)
-            .trim()
-            .slice(0, 12) || p.nick;
-      }
-
-      console.log(
-        '플레이어 재접속:',
-        code,
-        p.nick
-      );
-
-      emit(r);
-      return;
-    }
-
-    if (r.started) {
-      return socket.emit(
-        'err',
-        '이미 게임이 시작된 방입니다.'
-      );
-    }
-
-    if (r.players.length >= 2) {
-      return socket.emit(
-        'err',
-        '이미 2명이 들어와 있는 방입니다.'
-      );
-    }
-
-    p = {
-      id: pid,
-      socketId: socket.id,
-
-      nick:
-        (d.nick || '익명')
-          .trim()
-          .slice(0, 12) || '익명',
-
-      char: 'bazu',
-      ready: false,
-      hp: 100,
-      x: r.players.length === 0 ? 145 : 855,
-      items: [],
-      ult: 1,
-      shield: false,
-      fallen: false,
-      online: true
-    };
-
-    r.players.push(p);
-
-    attachPlayer(socket, r, p);
-
-    console.log(
-      '방 참가:',
-      code,
-      p.nick,
-      '인원:',
-      r.players.length
-    );
-
-    emit(r);
-  });
-
-  /* =========================
-     자동 복귀
-  ========================= */
-
-  socket.on('resume', d => {
-    const code =
-      String(d.code || '')
-        .trim()
-        .toUpperCase();
-
-    const pid =
-      String(d.pid || '')
-        .trim();
-
-    if (!code || !pid) return;
-
-    const r = rooms.get(code);
-
-    if (!r) {
-      return socket.emit('resume-failed');
-    }
-
-    const p = getPlayer(r, pid);
-
-    if (!p) {
-      return socket.emit('resume-failed');
-    }
-
-    attachPlayer(socket, r, p);
-
-    console.log(
-      '자동 복귀:',
-      code,
-      p.nick
-    );
-
-    emit(r);
-
-    if (
-      !r.started &&
-      r.players.length === 2 &&
-      r.players.every(x => x.ready && x.online)
-    ) {
-      setTimeout(() => begin(r), 300);
-    }
-  });
-
-  /* =========================
-     캐릭터 선택
-  ========================= */
-
-  socket.on('select', d => {
-    const r = getRoom(socket);
-
-    if (!r || r.started) return;
-
-    const p =
-      getSocketPlayer(r, socket);
-
-    if (!p) return;
-    if (!C[d.char]) return;
-
-    p.char = d.char;
-    p.ready = true;
-    p.online = true;
-
-    console.log(
-      '캐릭터 선택:',
-      r.code,
-      p.nick,
-      d.char
-    );
-
-    emit(r);
-
-    if (
-      r.players.length === 2 &&
-      r.players.every(x => x.ready && x.online)
-    ) {
-      setTimeout(() => {
-        begin(r);
-      }, 500);
-    }
-  });
-
-  /* =========================
-     이동
-  ========================= */
-
-  socket.on('move', d => {
-    const r = getRoom(socket);
-
-    if (!r || !r.started) return;
-
-    const p =
-      getSocketPlayer(r, socket);
-
-    if (!p) return;
-    if (r.turn !== p.id) return;
-
-    p.x = Math.max(
-      45,
-      Math.min(
-        955,
-        p.x +
-          Math.max(
-            -50,
-            Math.min(
-              50,
-              Number(d.dx) || 0
-            )
-          )
-      )
-    );
-
-    collect(r, p);
-
-    if (unstable(r, p)) {
-      p.fallen = true;
-      p.hp = 0;
-
-      emit(r);
-
-      const winner =
-        r.players.find(
-          x => x.id !== p.id
-        );
-
-      return end(
-        r,
-        winner?.id,
-        '낙사'
-      );
-    }
-
-    emit(r);
-  });
-
-  /* =========================
-     아이템
-  ========================= */
-
-  socket.on('use', d => {
-    const r = getRoom(socket);
-
-    if (!r || !r.started) return;
-
-    const p =
-      getSocketPlayer(r, socket);
-
-    if (!p) return;
-    if (r.turn !== p.id) return;
-
-    if (!p.items.includes(d.item)) {
-      return;
-    }
-
-    const i =
-      p.items.indexOf(d.item);
-
-    p.items.splice(i, 1);
-
-    if (d.item === 'heal') {
-      p.hp = Math.min(
-        C[p.char].hp,
-        p.hp + 25
-      );
-    }
-
-    if (d.item === 'shield') {
-      p.shield = true;
-    }
-
-    if (d.item === 'wind') {
-      r.wind = -r.wind;
-    }
-
-    emit(r);
-  });
-
-  /* =========================
-     발사
-  ========================= */
-
-  socket.on('fire', d => {
-    const r = getRoom(socket);
-
-    if (!r || !r.started) return;
-
-    const p =
-      getSocketPlayer(r, socket);
-
-    if (!p) return;
-    if (r.turn !== p.id) return;
-
-    const q =
-      r.players.find(
-        x => x.id !== p.id
-      );
-
-    if (!q) return;
-
-    let a =
-      Math.max(
-        10,
-        Math.min(
-          80,
-          Number(d.angle) || 45
-        )
-      );
-
-    let pow =
-      Math.max(
-        20,
-        Math.min(
-          100,
-          Number(d.power) || 60
-        )
-      );
-
-    let sk =
-      Math.max(
-        1,
-        Math.min(
-          3,
-          Number(d.skill) || 1
-        )
-      );
-
-    if (
-      sk === 3 &&
-      p.ult <= 0
-    ) {
-      sk = 1;
-    }
-
-    if (sk === 3) {
-      p.ult = 0;
-    }
-
-    const dir =
-      p.x < q.x ? 1 : -1;
-
-    const rad =
-      a * Math.PI / 180;
-
-    const speed =
-      pow * 0.19;
-
-    let vx =
-      Math.cos(rad) *
-        speed *
-        dir +
-      r.wind * 0.045;
-
-    let vy =
-      -Math.sin(rad) *
-      speed;
-
-    let x = p.x;
-    let y = 210;
-    let t = 0;
-
-    const pts = [];
-
-    while (
-      t < 18 &&
-      x > -80 &&
-      x < 1080 &&
-      y < 390
-    ) {
-      t += 0.05;
-
-      x += vx * 3.2;
-      y += vy * 3.2;
-
-      vy += 0.13;
-
-      if (pts.length < 260) {
-        pts.push([x, y]);
-      }
-    }
-
-    const hitX = x;
-
-    const dist =
-      Math.abs(
-        hitX - q.x
-      );
-
-    const base = {
-      croc: 27,
-      gayper: 36,
-      ham: 24,
-      big: 31,
-      odo: 30,
-      bazu: 33
-    }[p.char];
-
-    const radius = {
-      croc: 60,
-      gayper: 38,
-      ham: 48,
-      big: 72,
-      odo: 58,
-      bazu: 66
-    }[p.char];
-
-    const mult =
-      sk === 1
-        ? 1
-        : sk === 2
-        ? 1.22
-        : 1.58;
-
-    let dmg =
-      dist < radius
-        ? Math.round(
-            (
-              base *
-                (1 - dist / radius) +
-              8
-            ) *
-              mult
-          )
-        : 0;
-
-    const item = d.item;
-
-    if (
-      item &&
-      p.items.includes(item)
-    ) {
-      p.items.splice(
-        p.items.indexOf(item),
-        1
-      );
-
-      if (item === 'power') {
-        dmg =
-          Math.round(
-            dmg * 1.3
-          );
-      }
-
-      if (item === 'double') {
-        dmg =
-          Math.round(
-            dmg * 1.65
-          );
-      }
-    }
-
-    if (
-      q.shield &&
-      dmg
-    ) {
-      dmg =
-        Math.ceil(
-          dmg * 0.5
-        );
-
-      q.shield = false;
-    }
-
-    q.hp =
-      Math.max(
-        0,
-        q.hp - dmg
-      );
-
-    const crater = {
-      x: Math.max(
-        0,
-        Math.min(
-          1000,
-          hitX
-        )
-      ),
-
-      r:
-        sk === 3
-          ? 72
-          : sk === 2
-          ? 52
-          : 40
-    };
-
-    r.craters.push(crater);
-
-    if (
-      r.craters.length > 18
-    ) {
-      r.craters.shift();
-    }
-
-    io.to(r.code).emit(
-      'shot',
-      {
-        from: p.id,
-        pts,
-        hitX: crater.x,
-        skill: sk,
-        char: p.char,
-        damage: dmg,
-        victim: q.id
-      }
-    );
-
-    if (q.hp <= 0) {
-      return end(
-        r,
-        p.id,
-        '격파'
-      );
-    }
-
-    if (unstable(r, q)) {
-      q.fallen = true;
-      q.hp = 0;
-
-      emit(r);
-
-      return setTimeout(
-        () =>
-          end(
-            r,
-            p.id,
-            '낙사'
-          ),
-        450
-      );
-    }
-
-    r.turnNo++;
-
-    if (
-      r.turnNo % 3 === 0 &&
-      !r.box
-    ) {
-      const itemList = [
-        'double',
-        'power',
-        'heal',
-        'shield',
-        'wind'
-      ];
-
-      r.box = {
-        x:
-          130 +
-          Math.random() * 740,
-
-        item:
-          itemList[
-            Math.floor(
-              Math.random() *
-                itemList.length
-            )
-          ]
-      };
-
-      io.to(r.code).emit(
-        'drop',
-        r.box
-      );
-    }
-
-    collect(r, p);
-
-    r.wind =
-      Math.max(
-        -10,
-        Math.min(
-          10,
-          r.wind +
-            Math.floor(
-              Math.random() * 7
-            ) -
-            3
-        )
-      );
-
-    if (
-      Math.random() < 0.12
-    ) {
-      r.wind = -r.wind;
-    }
-
-    r.turn = q.id;
-
-    emit(r);
-  });
-
-  /* =========================
-     연결 종료
-     
-     중요:
-     바로 플레이어를 삭제하지 않는다.
-     30초 동안 재접속 가능.
-  ========================= */
-
-  socket.on('disconnect', () => {
-    const code =
-      socket.data.room;
-
-    const pid =
-      socket.data.pid;
-
-    if (!code || !pid) return;
-
-    const r =
-      rooms.get(code);
-
-    if (!r) return;
-
-    const p =
-      getPlayer(r, pid);
-
-    if (!p) return;
-
-    /*
-      이전 소켓이 끊긴 뒤 이미
-      새 소켓으로 재접속한 경우에는
-      offline 처리하지 않는다.
-    */
-    if (
-      p.socketId !== socket.id
-    ) {
-      return;
-    }
-
-    p.online = false;
-
-    console.log(
-      '연결 끊김 - 복귀 대기:',
-      code,
-      p.nick
-    );
-
-    emit(r);
-
-    setTimeout(() => {
-      const currentRoom =
-        rooms.get(code);
-
-      if (!currentRoom) return;
-
-      const currentPlayer =
-        getPlayer(
-          currentRoom,
-          pid
-        );
-
-      if (!currentPlayer) return;
-
-      /*
-        30초 안에 돌아왔으면 유지
-      */
-      if (currentPlayer.online) {
-        return;
-      }
-
-      currentRoom.players =
-        currentRoom.players.filter(
-          x => x.id !== pid
-        );
-
-      console.log(
-        '30초 초과 - 플레이어 제거:',
-        code,
-        currentPlayer.nick
-      );
-
-      if (
-        currentRoom.players.length === 0
-      ) {
-        rooms.delete(code);
-
-        console.log(
-          '빈 방 삭제:',
-          code
-        );
-
-        return;
-      }
-
-      currentRoom.started = false;
-      currentRoom.turn = null;
-
-      currentRoom.players.forEach(x => {
-        x.ready = false;
-      });
-
-      emit(currentRoom);
-
-      io.to(code).emit(
-        'err',
-        '상대의 연결이 종료되었습니다.'
-      );
-
-    }, 30000);
-  });
+    });
+  }
 });
 
-const PORT =
-  process.env.PORT || 3000;
+S.on('disconnect', () => {
+  if (st) {
+    notice('📡 연결 복구 중…');
+  }
+});
 
-server.listen(
-  PORT,
-  '0.0.0.0',
-  () => {
-    console.log(
-      `옥상동물전 실행: http://localhost:${PORT}`
+S.on('resume-failed', () => {
+  currentRoom = '';
+
+  sessionStorage.removeItem(
+    'rooftop_room'
+  );
+
+  st = null;
+  lastTurn = null;
+
+  clearInterval(timer);
+
+  $('#game').classList.add('hide');
+  $('#select').classList.add('hide');
+  $('#lobby').classList.remove('hide');
+
+  $('#err').textContent =
+    '기존 방이 종료되었습니다. 새 방을 만들어주세요.';
+});
+
+/* =========================
+   캐릭터 목록
+========================= */
+
+$('#roster').innerHTML =
+  Object.entries(D)
+    .map(([k, v]) => `
+      <button
+        type="button"
+        class="pick"
+        data-k="${k}"
+      >
+        <img
+          src="${v.img}"
+          alt="${v.n}"
+        >
+        <b>${v.n}</b>
+        <small>${v.s.join(' · ')}</small>
+      </button>
+    `)
+    .join('');
+
+/* =========================
+   방 만들기
+========================= */
+
+$('#create').onclick = () => {
+  const nick =
+    $('#nick').value.trim();
+
+  if (!nick) {
+    $('#err').textContent =
+      '닉네임을 입력하세요.';
+    return;
+  }
+
+  currentNick = nick;
+
+  localStorage.setItem(
+    'rooftop_nick',
+    nick
+  );
+
+  $('#err').textContent =
+    '방 만드는 중…';
+
+  S.emit('create', {
+    nick,
+    pid
+  });
+};
+
+/* =========================
+   방 참가
+========================= */
+
+$('#join').onclick = () => {
+  const nick =
+    $('#nick').value.trim();
+
+  const code =
+    $('#code')
+      .value
+      .trim()
+      .toUpperCase();
+
+  if (!nick) {
+    $('#err').textContent =
+      '닉네임을 입력하세요.';
+    return;
+  }
+
+  if (!code) {
+    $('#err').textContent =
+      '방 코드를 입력하세요.';
+    return;
+  }
+
+  currentNick = nick;
+
+  localStorage.setItem(
+    'rooftop_nick',
+    nick
+  );
+
+  $('#err').textContent =
+    '방 참가 중…';
+
+  S.emit('join', {
+    nick,
+    code,
+    pid
+  });
+};
+
+/* =========================
+   서버 오류
+========================= */
+
+S.on('err', m => {
+  $('#err').textContent = m;
+  notice(m);
+});
+
+/* =========================
+   캐릭터 선택
+========================= */
+
+document
+  .querySelectorAll('.pick')
+  .forEach(button => {
+
+    button.addEventListener(
+      'click',
+      () => {
+
+        if (!st) {
+          notice(
+            '방 연결을 기다려주세요.'
+          );
+          return;
+        }
+
+        const char =
+          button.dataset.k;
+
+        if (
+          !char ||
+          !D[char]
+        ) return;
+
+        selectedChar = char;
+
+        document
+          .querySelectorAll('.pick')
+          .forEach(x => {
+            x.classList.remove('on');
+          });
+
+        button.classList.add('on');
+
+        $('#wait').textContent =
+          '✅ 캐릭터 선택 완료 · 서버 확인 중…';
+
+        S.emit('select', {
+          char
+        });
+      }
+    );
+  });
+
+/* =========================
+   초대 링크
+========================= */
+
+$('#share').onclick = async () => {
+  if (!st || !st.code) return;
+
+  const url =
+    location.origin +
+    location.pathname +
+    '?room=' +
+    encodeURIComponent(st.code);
+
+  try {
+    await navigator.clipboard.writeText(url);
+
+    $('#share').textContent =
+      '복사됨!';
+  } catch {
+    prompt(
+      '이 링크를 친구에게 보내세요',
+      url
     );
   }
-);
+
+  setTimeout(() => {
+    $('#share').textContent =
+      '초대 링크 복사';
+  }, 1200);
+};
+
+/* =========================
+   서버 상태 수신
+========================= */
+
+S.on('state', x => {
+  const turnChanged =
+    lastTurn !== x.turn;
+
+  lastTurn = x.turn;
+  st = x;
+
+  currentRoom = x.code;
+
+  sessionStorage.setItem(
+    'rooftop_room',
+    x.code
+  );
+
+  $('#lobby').classList.add('hide');
+
+  $('#roomCode').textContent =
+    x.code;
+
+  const me =
+    x.players.find(
+      p => p.id === pid
+    );
+
+  if (me) {
+    if (me.ready) {
+      selectedChar = me.char;
+    }
+
+    document
+      .querySelectorAll('.pick')
+      .forEach(button => {
+        button.classList.toggle(
+          'on',
+          !!me.ready &&
+          button.dataset.k === me.char
+        );
+      });
+  }
+
+  /*
+    둘 다 준비되어 서버가 started=true를 보내면
+    바로 게임 화면으로 전환
+  */
+  if (x.started) {
+    $('#select').classList.add('hide');
+    $('#game').classList.remove('hide');
+
+    render();
+
+    if (turnChanged) {
+      resetTimer();
+    }
+
+    return;
+  }
+
+  $('#game').classList.add('hide');
+  $('#select').classList.remove('hide');
+
+  updateWaitingText();
+});
+
+/* =========================
+   대기 상태 문구
+========================= */
+
+function updateWaitingText() {
+  if (!st) return;
+
+  const me =
+    st.players.find(
+      p => p.id === pid
+    );
+
+  const other =
+    st.players.find(
+      p => p.id !== pid
+    );
+
+  if (!me) {
+    $('#wait').textContent =
+      '서버와 플레이어 정보를 맞추는 중…';
+    return;
+  }
+
+  if (st.players.length < 2) {
+    $('#wait').textContent =
+      me.ready
+        ? '✅ 캐릭터 선택 완료 · 상대를 기다리는 중…'
+        : '상대를 기다리는 중…';
+
+    return;
+  }
+
+  if (!other) {
+    $('#wait').textContent =
+      '상대 정보를 불러오는 중…';
+    return;
+  }
+
+  if (!other.online) {
+    $('#wait').textContent =
+      '📡 상대 재접속을 기다리는 중…';
+    return;
+  }
+
+  if (!me.ready) {
+    $('#wait').textContent =
+      '👆 내 캐릭터를 선택하세요';
+    return;
+  }
+
+  if (!other.ready) {
+    $('#wait').textContent =
+      '✅ 나는 준비 완료 · 상대 캐릭터 선택 대기 중…';
+    return;
+  }
+
+  $('#wait').textContent =
+    '🔥 둘 다 준비 완료 · 게임 시작 중…';
+}
+
+/* =========================
+   공통
+========================= */
+
+function maxhp(c) {
+  return {
+    croc: 100,
+    gayper: 90,
+    ham: 95,
+    big: 120,
+    odo: 105,
+    bazu: 100
+  }[c];
+}
+
+function esc(s) {
+  return String(s).replace(
+    /[&<>"']/g,
+    c => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[c])
+  );
+}
+
+function hud(p) {
+  return `
+    <div class="hud">
+      <b>${esc(p.nick)}</b>
+      · ${D[p.char].n}
+      ❤️ ${p.hp}/${maxhp(p.char)}
+      ${p.shield ? ' 🛡️' : ''}
+      ${p.online === false ? ' 📡' : ''}
+
+      <div class="hp">
+        <i style="width:${100 * p.hp / maxhp(p.char)}%"></i>
+      </div>
+    </div>
+  `;
+}
+
+function notice(t) {
+  $('#notice').textContent =
+    t || '';
+
+  if (t) {
+    setTimeout(() => {
+      if (
+        $('#notice').textContent === t
+      ) {
+        $('#notice').textContent = '';
+      }
+    }, 1800);
+  }
+}
+
+/* =========================
+   게임 렌더링
+========================= */
+
+function render() {
+  if (!st) return;
+
+  const me =
+    st.players.find(
+      p => p.id === pid
+    );
+
+  const foe =
+    st.players.find(
+      p => p.id !== pid
+    );
+
+  if (!me || !foe) return;
+
+  $('#meHud').innerHTML =
+    hud(me);
+
+  $('#foeHud').innerHTML =
+    hud(foe);
+
+  $('#wind').textContent =
+    '🌬️ ' +
+    (st.wind >= 0 ? '→ ' : '← ') +
+    Math.abs(st.wind);
+
+  $('#turn').textContent =
+    st.turn === pid
+      ? '🟡 내 턴'
+      : '상대 턴';
+
+  const myTurn =
+    st.turn === pid &&
+    me.online !== false;
+
+  $('#fire').disabled =
+    !myTurn;
+
+  $('#left').disabled =
+    !myTurn;
+
+  $('#right').disabled =
+    !myTurn;
+
+  $('#use').disabled =
+    !myTurn;
+
+  $('#me').src =
+    D[me.char].img;
+
+  $('#foe').src =
+    D[foe.char].img;
+
+  $('#me').style.left =
+    `calc(${me.x / 10}% - 55px)`;
+
+  $('#foe').style.left =
+    `calc(${foe.x / 10}% - 55px)`;
+
+  $('#me').className =
+    'unit' +
+    (me.fallen ? ' fall' : '');
+
+  $('#foe').className =
+    'unit foe' +
+    (foe.fallen ? ' fall' : '');
+
+  draw();
+
+  $('#skills').innerHTML =
+    D[me.char].s
+      .map((name, i) => `
+        <button
+          class="skill ${skill === i + 1 ? 'on' : ''}"
+          data-s="${i + 1}"
+          ${i === 2 && me.ult <= 0 ? 'disabled' : ''}
+        >
+          ${i + 1}. ${name}${i === 2 ? ' · 1회' : ''}
+        </button>
+      `)
+      .join('');
+
+  document
+    .querySelectorAll('.skill')
+    .forEach(button => {
+
+      button.onclick = () => {
+        skill =
+          Number(
+            button.dataset.s
+          );
+
+        render();
+      };
+    });
+
+  $('#item').innerHTML =
+    '<option value="">아이템</option>' +
+    me.items
+      .map(
+        x =>
+          `<option value="${x}">${names[x]}</option>`
+      )
+      .join('');
+}
+
+/* =========================
+   맵 그리기
+========================= */
+
+function draw() {
+  const c = $('#cv');
+  const g = c.getContext('2d');
+
+  const w = c.width;
+  const h = c.height;
+
+  const grd =
+    g.createLinearGradient(
+      0,
+      0,
+      0,
+      h
+    );
+
+  grd.addColorStop(
+    0,
+    '#8c9aa2'
+  );
+
+  grd.addColorStop(
+    0.55,
+    '#d7a36f'
+  );
+
+  grd.addColorStop(
+    0.56,
+    '#6d6b66'
+  );
+
+  grd.addColorStop(
+    1,
+    '#494744'
+  );
+
+  g.fillStyle = grd;
+
+  g.fillRect(
+    0,
+    0,
+    w,
+    h
+  );
+
+  g.fillStyle =
+    '#555';
+
+  for (
+    let x = 0;
+    x < w;
+    x += 90
+  ) {
+    const bh =
+      50 +
+      (x * 17 % 95);
+
+    g.fillRect(
+      x,
+      230 - bh,
+      80,
+      bh
+    );
+  }
+
+  g.fillStyle =
+    '#77736d';
+
+  g.fillRect(
+    0,
+    260,
+    w,
+    170
+  );
+
+  g.fillStyle =
+    '#514d48';
+
+  g.fillRect(
+    0,
+    260,
+    w,
+    14
+  );
+
+  g.fillStyle =
+    '#4c5b60';
+
+  g.beginPath();
+
+  g.ellipse(
+    500,
+    245,
+    55,
+    70,
+    0,
+    Math.PI,
+    0
+  );
+
+  g.fill();
+
+  g.fillStyle =
+    '#8d8a80';
+
+  g.fillRect(
+    160,
+    205,
+    135,
+    55
+  );
+
+  g.fillStyle =
+    '#aaa79d';
+
+  g.fillRect(
+    785,
+    225,
+    105,
+    35
+  );
+
+  for (
+    const cr of st.craters || []
+  ) {
+    g.save();
+
+    g.globalCompositeOperation =
+      'destination-out';
+
+    g.beginPath();
+
+    g.arc(
+      cr.x,
+      270,
+      cr.r,
+      0,
+      Math.PI * 2
+    );
+
+    g.fill();
+
+    g.restore();
+
+    g.strokeStyle =
+      '#2c2926';
+
+    g.lineWidth = 5;
+
+    g.beginPath();
+
+    g.arc(
+      cr.x,
+      270,
+      cr.r,
+      Math.PI,
+      Math.PI * 2
+    );
+
+    g.stroke();
+  }
+
+  if (st.box) {
+    g.font =
+      '38px sans-serif';
+
+    g.fillText(
+      '📦',
+      st.box.x,
+      245
+    );
+  }
+}
+
+/* =========================
+   조작
+========================= */
+
+$('#angle').oninput = e => {
+  $('#av').textContent =
+    e.target.value + '°';
+};
+
+$('#power').oninput = e => {
+  $('#pv').textContent =
+    e.target.value;
+};
+
+$('#left').onclick = () => {
+  S.emit('move', {
+    dx: -45
+  });
+};
+
+$('#right').onclick = () => {
+  S.emit('move', {
+    dx: 45
+  });
+};
+
+$('#use').onclick = () => {
+  const v =
+    $('#item').value;
+
+  if (v) {
+    S.emit('use', {
+      item: v
+    });
+  }
+};
+
+$('#fire').onclick = () => {
+  S.emit('fire', {
+    angle:
+      Number(
+        $('#angle').value
+      ),
+
+    power:
+      Number(
+        $('#power').value
+      ),
+
+    skill,
+
+    item:
+      $('#item').value
+  });
+};
+
+/* =========================
+   턴 타이머
+========================= */
+
+function resetTimer() {
+  clearInterval(timer);
+
+  left = 20;
+
+  $('#timer').textContent =
+    left;
+
+  timer =
+    setInterval(() => {
+
+      if (
+        !st ||
+        st.turn !== pid
+      ) return;
+
+      left--;
+
+      $('#timer').textContent =
+        left;
+
+      if (left <= 0) {
+        clearInterval(timer);
+
+        S.emit('fire', {
+          angle: 45,
+          power: 35,
+          skill: 1,
+          item: ''
+        });
+      }
+    }, 1000);
+}
+
+/* =========================
+   발사 애니메이션
+========================= */
+
+S.on('shot', d => {
+  const a =
+    $('#arena');
+
+  const fx =
+    $('#fx');
+
+  const mine =
+    d.from === pid;
+
+  const unit =
+    mine
+      ? $('#me')
+      : $('#foe');
+
+  unit.classList.add(
+    'shake'
+  );
+
+  setTimeout(() => {
+    unit.classList.remove(
+      'shake'
+    );
+  }, 280);
+
+  const m =
+    document.createElement(
+      'div'
+    );
+
+  m.className =
+    'muzzle';
+
+  m.textContent =
+    d.char === 'odo'
+      ? '💢'
+      : '🔥';
+
+  m.style.left =
+    mine
+      ? '16%'
+      : '80%';
+
+  m.style.bottom =
+    '34%';
+
+  fx.appendChild(m);
+
+  setTimeout(() => {
+    m.remove();
+  }, 300);
+
+  const dot =
+    document.createElement(
+      'div'
+    );
+
+  dot.style.cssText =
+    'position:absolute;' +
+    'width:12px;' +
+    'height:12px;' +
+    'border-radius:50%;' +
+    'background:#171717;' +
+    'z-index:8;';
+
+  fx.appendChild(dot);
+
+  const pts =
+    d.pts || [];
+
+  let i = 0;
+
+  const scale =
+    a.clientWidth / 1000;
+
+  function go() {
+    if (
+      i >= pts.length
+    ) {
+      dot.remove();
+
+      const b =
+        document.createElement(
+          'div'
+        );
+
+      b.className =
+        'boom';
+
+      b.textContent =
+        '💥';
+
+      b.style.left =
+        (
+          d.hitX *
+            scale -
+          35
+        ) +
+        'px';
+
+      b.style.top =
+        '55%';
+
+      fx.appendChild(b);
+
+      setTimeout(() => {
+        b.remove();
+      }, 500);
+
+      if (d.damage) {
+        notice(
+          `${d.damage} 피해!`
+        );
+      }
+
+      return;
+    }
+
+    const p =
+      pts[i++];
+
+    dot.style.left =
+      (
+        p[0] *
+        scale
+      ) +
+      'px';
+
+    dot.style.top =
+      (
+        p[1] *
+        a.clientHeight /
+        430
+      ) +
+      'px';
+
+    requestAnimationFrame(
+      go
+    );
+  }
+
+  go();
+});
+
+/* =========================
+   보급상자
+========================= */
+
+S.on('drop', () => {
+  const f =
+    document.createElement(
+      'div'
+    );
+
+  f.className =
+    'boom';
+
+  f.textContent =
+    '🪂📦';
+
+  f.style.left =
+    '48%';
+
+  f.style.top =
+    '8%';
+
+  $('#fx').appendChild(f);
+
+  setTimeout(() => {
+    f.remove();
+  }, 700);
+
+  notice(
+    '보급상자 투하! 가까이 이동해서 획득'
+  );
+});
+
+S.on('pickup', d => {
+  notice(
+    d.player === pid
+      ? '📦 ' +
+        names[d.item] +
+        ' 획득!'
+      : '상대가 보급상자를 획득했습니다.'
+  );
+});
+
+/* =========================
+   게임 종료
+========================= */
+
+S.on('over', d => {
+  clearInterval(timer);
+
+  setTimeout(() => {
+    alert(
+      d.winner === pid
+        ? `승리! 🏆 (${d.reason})`
+        : `패배! 💀 (${d.reason})`
+    );
+  }, 500);
+});
